@@ -1,13 +1,27 @@
 import os
+import sys
+import json
 from bs4 import BeautifulSoup
 import requests
 from tqdm import tqdm
 import hashlib
+import subprocess
+import ctypes
 
 print("FetchBurn starting...")
 #fetching data from API
 
 response = requests.get("https://api.launchpad.net/1.0/ubuntu/series")
+
+def is_admin():
+    try:
+        return ctypes.windll.shell32.IsUserAnAdmin()
+    except:
+        return False
+if not is_admin():
+    print("This script must be run with administrator privileges. Please run it as an administrator.")
+    print("Requesting administrator privileges...")
+    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
 
 if response.status_code == 200:
     print("Data fetched successfully!")
@@ -44,20 +58,23 @@ if response.status_code == 200:
     
     filename = f"ubuntu-{version}-desktop-amd64.iso"
     save_path = os.path.join(os.getcwd(), filename)
-    print(f"Now downloading {filename} at {save_path}...")
-    try:
-        with requests.get(download_url, stream=True) as r:
-            total_size = int(r.headers.get('content-length', 0))
-            print(f"File size: {total_size / (1024 * 1024):.2f} MB")
-            t=tqdm(total=total_size, unit='B', unit_scale=True, leave=False, desc=filename)
-            r.raise_for_status()
-            with open(save_path, 'wb') as f:
-                for chunk in r.iter_content(chunk_size=10*1024*1024):  # 10 MB chunks
-                    f.write(chunk)
-                    t.update(len(chunk))
-        print("Download completed successfully!")
-    except Exception as e:
-        print(f"An error occurred during download: {e}")
+    if os.path.exists(save_path):
+        print(f"{filename} already exists at {save_path}. Skipping download.")
+    else:
+        print(f"Now downloading {filename} at {save_path}...")
+        try:
+            with requests.get(download_url, stream=True) as r:
+                total_size = int(r.headers.get('content-length', 0))
+                print(f"File size: {total_size / (1024 * 1024):.2f} MB")
+                t=tqdm(total=total_size, unit='B', unit_scale=True, leave=False, desc=filename)
+                r.raise_for_status()
+                with open(save_path, 'wb') as f:
+                    for chunk in r.iter_content(chunk_size=10*1024*1024):  # 10 MB chunks
+                        f.write(chunk)
+                        t.update(len(chunk))
+            print("Download completed successfully!")
+        except Exception as e:
+            print(f"An error occurred during download: {e}")
     
     # Verify the file integrity using SHA256 checksum
 
@@ -93,5 +110,38 @@ if response.status_code == 200:
             except Exception as e:
                 print(f"An error occurred while fetching or processing checksums: {e}")
 
+    # Write the download ISO file to a removable drive
+
+    print("Available drives:")
+    def find_usb_physical_drives():
+        if sys.platform != "win32":
+            print("This drive detection method is only implemented for Windows.")
+            return []
+        print("Detecting removable drives on Windows...")
+        ps_command = "get-physicaldisk | where-object { $_.BusType -eq 'USB' } | select-object DeviceID, FriendlyName | ConvertTo-Json"
+        try:
+            result = subprocess.run(["powershell", "-NoProfile", "-Command", ps_command], capture_output=True, text=True, check=True)
+            output = result.stdout.strip()
+            if not output:
+                print("No removable drives detected.")
+                return []
+            disks = json.loads(output)
+
+            if isinstance(disks, dict):
+                disks = [disks]  # Handle single drive case
+
+            for disk in disks:
+                print(f"DeviceID: {disk['DeviceID']}, FriendlyName: {disk['FriendlyName']}")
+            return disks
+        except subprocess.CalledProcessError as e:
+            print(f"An error occurred while detecting drives: {e}")
+            return []
+        except json.JSONDecodeError as e:
+            print(f"Failed to parse drive information: {e}")
+            return []
+    
+    print("Attempting to write the ISO file to a removable drive...")
+    usb_drives = find_usb_physical_drives()
+    
 else:
     print(f"Error message: {response.text}")
