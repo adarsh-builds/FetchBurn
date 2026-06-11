@@ -7,11 +7,10 @@ from tqdm import tqdm
 import hashlib
 import subprocess
 import ctypes
+import win32file
+import win32con
+import winioctlcon
 
-print("FetchBurn starting...")
-#fetching data from API
-
-response = requests.get("https://api.launchpad.net/1.0/ubuntu/series")
 
 def is_admin():
     try:
@@ -21,7 +20,19 @@ def is_admin():
 if not is_admin():
     print("This script must be run with administrator privileges. Please run it as an administrator.")
     print("Requesting administrator privileges...")
-    ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, " ".join(sys.argv), None, 1)
+    script = os.path.abspath(sys.argv[0])
+    ctypes.windll.shell32.ShellExecuteW(None,
+                                        "runas",
+                                        sys.executable,
+                                        f'"{script}"',
+                                        None,
+                                        1)
+    sys.exit()
+
+print("FetchBurn starting...")
+#fetching data from API
+
+response = requests.get("https://api.launchpad.net/1.0/ubuntu/series")
 
 if response.status_code == 200:
     print("Data fetched successfully!")
@@ -69,9 +80,10 @@ if response.status_code == 200:
                 t=tqdm(total=total_size, unit='B', unit_scale=True, leave=False, desc=filename)
                 r.raise_for_status()
                 with open(save_path, 'wb') as f:
-                    for chunk in r.iter_content(chunk_size=10*1024*1024):  # 10 MB chunks
-                        f.write(chunk)
-                        t.update(len(chunk))
+                    with tqdm(total=total_size, unit='B', unit_scale=True, desc=filename) as t:
+                        for chunk in r.iter_content(chunk_size=10*1024*1024):
+                            f.write(chunk)
+                            t.update(len(chunk))
             print("Download completed successfully!")
         except Exception as e:
             print(f"An error occurred during download: {e}")
@@ -143,5 +155,116 @@ if response.status_code == 200:
     print("Attempting to write the ISO file to a removable drive...")
     usb_drives = find_usb_physical_drives()
     
+    if usb_drives:
+        target_drive = usb_drives[0]  # For simplicity, we take the first detected USB drive
+        device_path = f"\\\\.\\PhysicalDrive{target_drive['DeviceID']}"
+        print(f"Writing to {target_drive['FriendlyName']}...")
+        confirm = input(f"Are you sure you want to write the ISO to {target_drive['FriendlyName']}? This will erase all data on the drive. (yes/no): ")
+        if confirm.lower() == 'yes':
+            try:
+                #unmounted the drive if it's mounted
+                def get_drive_letter(device_id):
+                    ps_command = f"""
+                    $disk = Get-Disk -Number {device_id}
+                    $partitions = Get-Partition -DiskNumber {device_id} | Where-Object {{ $_.DriveLetter }}
+                    $partitions[0].DriveLetter
+                    """
+                    result = subprocess.run(["powershell", "-NoProfile", "-Command", ps_command], capture_output=True, text=True, check=True)
+                    return result.stdout.strip()
+                drive_letter = get_drive_letter(target_drive['DeviceID'])
+                print(f"Detected drive letter: {target_drive['FriendlyName']}: {drive_letter}")
+                print(device_path)
+                print(ctypes.windll.shell32.IsUserAnAdmin())
+                if drive_letter:
+                    volume_path = f"\\\\.\\{drive_letter}:"
+                    print(f"Attempting to unmount drive {drive_letter}...")         
+                    try:
+                        volume_handle = win32file.CreateFile(
+                            volume_path,
+                            win32con.GENERIC_READ | win32con.GENERIC_WRITE,
+                            win32con.FILE_SHARE_READ | win32con.FILE_SHARE_WRITE,
+                            None,
+                            win32con.OPEN_EXISTING,
+                            0,
+                            None
+                        )
+                        win32file.DeviceIoControl(
+                            volume_handle,
+                            winioctlcon.FSCTL_LOCK_VOLUME,
+                            None,
+                            0)
+                        win32file.DeviceIoControl(volume_handle,
+                                                  winioctlcon.FSCTL_DISMOUNT_VOLUME,
+                                                  None,
+                                                  0)
+                        print(f"Drive {target_drive['FriendlyName']} unmounted successfully.")
+                    except Exception as e:
+                        print(f"Could not unmount the drive: {e}")
+
+                def write_iso_with_python(iso_path, device_path):
+                    if not os.path.exists(iso_path):
+                        print(f"Error: ISO file not found at {iso_path}")
+                        return False
+
+                    print(f"Writing {iso_path} to {device_path}...")
+                    
+                    try:
+                        total_size = os.path.getsize(iso_path)
+                        chunk_size = 4 * 1024 * 1024  # 4MB chunks
+                        sector_size = 512             # Standard physical sector size
+                        
+                        # r+b is critical! 'wb' tells Windows to truncate the file, which crashes on raw physical drives
+                        with open(iso_path, 'rb') as f_in, open(device_path, 'r+b', buffering=0) as f_out:
+                            
+                            with tqdm(total=total_size, unit='B', unit_scale=True, unit_divisor=1024, desc="Flashing ISO") as pbar:
+                                while True:
+                                    chunk = f_in.read(chunk_size)
+                                    if not chunk:
+                                        break 
+                                    
+                                    # --- PADDING ---
+                                    # Windows raw disk writes must perfectly align with the 512-byte sector size. Padding the final chunk prevents Errno 22.
+                                    remainder = len(chunk) % sector_size
+                                    if remainder != 0:
+                                        padding_needed = sector_size - remainder
+                                        chunk += b'\x00' * padding_needed
+                                    # ---------------
+
+                                    f_out.write(chunk)
+                                    
+                                    pbar.update(min(len(chunk), total_size - pbar.n))
+                        
+                        print("\nISO file written to the drive successfully!")
+                        return True
+
+                    except PermissionError:
+                        print("\nAccess Denied: You must run this script as an Administrator to write to raw drives.")
+                        return False
+                    except OSError as e:
+                        print(f"\nOS Error occurred: {e}")
+                        print("Did you make sure to dismount and lock the drive first?")
+                        return False
+                    except Exception as e:
+                        print(f"\nAn unexpected error occurred: {e}")
+                        return False
+               
+                print(f"Starting to write {filename} to {target_drive['FriendlyName']}...")
+                if write_iso_with_python(save_path, device_path):
+                    print("Operation completed successfully!")
+                else:
+                    print("Operation failed.")
+                
+                if 'volume_handle' in locals():
+                    win32file.CloseHandle(volume_handle)
+                    print("Drive lock released.")
+
+            except Exception as e:
+                print(f"An error occurred: {e}")
+        else:
+            print("Operation cancelled.")
+    else:
+        print("No removable drives detected.")
 else:
     print(f"Error message: {response.text}")
+
+input("\nPress Enter to exit...")
