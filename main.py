@@ -17,7 +17,78 @@ def is_admin():
         return ctypes.windll.shell32.IsUserAnAdmin()
     except:
         return False
+
+def fetch_ubuntu_iso_details():
+    """Fetches the latest stable Ubuntu release details."""
+    print("Fetching latest Ubuntu release data...")
+    response = requests.get("https://api.launchpad.net/1.0/ubuntu/series")
+    if response.status_code != 200:
+        return None, None, None, f"API Error: {response.status_code}"
+
+    entries = response.json().get('entries', [])
+    stable = next((r for r in entries if r.get('status') == 'Current Stable Release'), None)
     
+    if not stable:
+        return None, None, None, "No stable release found."
+
+    version = stable.get('version')
+    base_url = f"https://releases.ubuntu.com/{version}/"
+    filename = f"ubuntu-{version}-desktop-amd64.iso"
+    
+    # Scrape the exact ISO download link
+    soup = BeautifulSoup(requests.get(base_url).text, 'html.parser')
+    for link in soup.find_all('a'):
+        href = link.get('href')
+        if href and 'desktop' in href and href.endswith('.iso'):
+            return base_url + href, version, base_url, filename
+
+    return None, None, None, "No desktop ISO link found on the release page."
+
+def download_iso_file(download_url, filename):
+    """Downloads the ISO if it doesn't already exist."""
+    save_path = os.path.join(os.getcwd(), filename)
+    if os.path.exists(save_path):
+        print(f"\n{filename} already exists locally. Skipping download.")
+        return save_path
+
+    print(f"\nDownloading {filename}...")
+    with requests.get(download_url, stream=True) as r:
+        r.raise_for_status()
+        total_size = int(r.headers.get('content-length', 0))
+        with open(save_path, 'wb') as f:
+            with tqdm(total=total_size, unit='B', unit_scale=True, desc=filename) as t:
+                for chunk in r.iter_content(chunk_size=10*1024*1024):
+                    f.write(chunk)
+                    t.update(len(chunk))
+    return save_path
+
+def verify_iso_checksum(save_path, filename, base_url):
+    """Verifies the downloaded ISO against the official SHA256 hashes."""
+    print("\nVerifying file integrity (this may take a minute)...")
+    sha256_hash = hashlib.sha256()
+    with open(save_path, "rb") as f:
+        for byte_block in iter(lambda: f.read(16 * 1024 * 1024), b""):
+            sha256_hash.update(byte_block)
+    computed_checksum = sha256_hash.hexdigest()
+
+    checksum_url = base_url + "SHA256SUMS"
+    try:
+        checksums = requests.get(checksum_url).text
+        for line in checksums.splitlines():
+            if filename in line:
+                official_checksum = line.split()[0]
+                if computed_checksum == official_checksum:
+                    print("Checksum verification passed! The file is valid.")
+                    return True
+                else:
+                    print("Checksum verification failed! The file may be corrupted.")
+                    return False
+    except Exception as e:
+        print(f"Could not fetch official checksums: {e}")
+        return False
+        
+    return False
+
 def get_drive_letter(device_id):
     ps_command = f"""
     $disk = Get-Disk -Number {device_id}
@@ -229,128 +300,50 @@ while True:
         break
 
     elif action.lower() == 'write':
-        print("You have chosen to write an ISO to a removable drive.")
-        response = requests.get("https://api.launchpad.net/1.0/ubuntu/series")
-
-        if response.status_code == 200:
-            print("Data fetched successfully!")
-            data = response.json()
-            entries = data['entries']
-                
-            print(f"Total releases found: {len(entries)}")
+        print("\nYou have chosen to write an ISO to a removable drive.")
+        
+        # Fetch details
+        download_url, version, base_url, filename = fetch_ubuntu_iso_details()
+        
+        if not download_url:
+            print(f"Error fetching Ubuntu details: {filename}")
+            continue
             
-            stable = None 
-            for release in entries:
-                if release.get('status') == 'Current Stable Release':
-                    stable = release
-                    break # Stop at first match — only one stable release exists
-
-            version = stable.get('version')
-            print(f"Latest stable release: {version}")
-
-            url = f"https://releases.ubuntu.com/{version}/"
-            response = requests.get(url)
-            soup = BeautifulSoup(response.text, 'html.parser')  
-            links = soup.find_all('a')
+        print(f"Latest stable release: {version}")
+        
+        # Download
+        try:
+            save_path = download_iso_file(download_url, filename)
+        except Exception as e:
+            print(f"Download failed: {e}")
+            continue
             
-            seen = set()  # Deduplicate ISO links - releases page lists each file twice
-            download_url = None
-            for link in links:
-                href = link.get('href')
-                if href and 'desktop' in href and href.endswith('.iso') and href not in seen:
-                    download_url = url + href
-                    seen.add(href)
-                    break
-            if not download_url:
-                print("No desktop ISO found.")
-                exit()
+        # Verify
+        if not verify_iso_checksum(save_path, filename, base_url):
+            continue  # Skips the flash if the file is corrupted
             
-            filename = f"ubuntu-{version}-desktop-amd64.iso"
-            save_path = os.path.join(os.getcwd(), filename)
-            if os.path.exists(save_path):
-                print(f"{filename} already exists at {save_path}. Skipping download.")
-            else:
-                print(f"Now downloading {filename} at {save_path}...")
-                try:
-                    with requests.get(download_url, stream=True) as r:
-                        total_size = int(r.headers.get('content-length', 0))
-                        print(f"File size: {total_size / (1024 * 1024):.2f} MB")
-                        r.raise_for_status()
-                        with open(save_path, 'wb') as f:
-                            with tqdm(total=total_size, unit='B', unit_scale=True, desc=filename) as t:
-                                for chunk in r.iter_content(chunk_size=10*1024*1024):
-                                    f.write(chunk)
-                                    t.update(len(chunk))
-                    print("Download completed successfully!")
-                except Exception as e:
-                    print(f"An error occurred during download: {e}")
+        # Flash to USB
+        print("\nAttempting to write the ISO file to a removable drive...")
+        usb_drives = find_usb_physical_drives()
+        
+        if usb_drives:
+            target_drive = usb_drives[0] 
+            device_path = f"\\\\.\\PhysicalDrive{target_drive['DeviceID']}"
             
-            # Verify the file integrity using SHA256 checksum
-
-            print("Verifying file integrity...")
-            sha256_hash = hashlib.sha256()
-            try:
-                with open(save_path, "rb") as f:
-                    for byte_block in iter(lambda: f.read(4096), b""):
-                        sha256_hash.update(byte_block)
-                computed_checksum = sha256_hash.hexdigest()
-                print(f"Computed SHA256 checksum: {computed_checksum}")
-            except Exception as e:
-                print(f"An error occurred during checksum calculation: {e}")
+            print(f"Target selected: {target_drive['FriendlyName']}")
+            confirm = input(f"Are you sure you want to write {filename} to {target_drive['FriendlyName']}? This will ERASE ALL DATA. (yes/no): ")
             
-            for link in links:
-                href = link.get('href')
-                if href and href.endswith('SHA256SUMS'):
-                    checksum_url = url + href
-                    print(f"Fetching official checksums from {checksum_url}...")
-                    try:
-                        checksum_response = requests.get(checksum_url)
-                        checksum_response.raise_for_status()
-                        checksums = checksum_response.text
-                        for line in checksums.splitlines():
-                            if filename in line:
-                                official_checksum = line.split()[0]
-                                print(f"Official SHA256 checksum: {official_checksum}")
-                                if computed_checksum == official_checksum:
-                                    print("Checksum verification passed! The file is valid.")
-                                else:
-                                    print("Checksum verification failed! The file may be corrupted.")
-                                break
-                    except Exception as e:
-                        print(f"An error occurred while fetching or processing checksums: {e}")
-
-            # Write the download ISO file to a removable drive      
-            # Write the download ISO file to a removable drive      
-            print("\nAttempting to write the ISO file to a removable drive...")
-            usb_drives = find_usb_physical_drives()
-            
-            if usb_drives:
-                # Note: You can replace this with an interactive menu later!
-                target_drive = usb_drives[0] 
-                device_path = f"\\\\.\\PhysicalDrive{target_drive['DeviceID']}"
-                
-                print(f"Target selected: {target_drive['FriendlyName']}")
-                confirm = input(f"Are you sure you want to write {filename} to {target_drive['FriendlyName']}? This will ERASE ALL DATA. (yes/no): ")
-                
-                if confirm.lower() == 'yes':
-                    print(f"Starting flash process for {target_drive['FriendlyName']}...")
-                    
-                    # --- The Magic Happens Here ---
-                    # All locking, unmounting, flashing, and unlocking is handled inside this single call.
-                    if write_iso_with_python(save_path, device_path, target_drive):
-                        print("Base operation completed successfully!")
-                        create_data_partition(target_drive['DeviceID'])
-                    else:
-                        print("Operation failed during the flash process.")
-                    # ------------------------------
-                    
+            if confirm.lower() == 'yes':
+                print(f"Starting flash process for {target_drive['FriendlyName']}...")
+                if write_iso_with_python(save_path, device_path, target_drive):
+                    print("Base operation completed successfully!")
+                    create_data_partition(target_drive['DeviceID'])
                 else:
-                    print("Operation cancelled by user.")
+                    print("Operation failed during the flash process.")
             else:
-                print("No removable drives detected.")
-                
+                print("Operation cancelled by user.")
         else:
-            print(f"Error message: {response.text}")
+            print("No removable drives detected.")
             
     elif action.lower() == 'restore':
         print("You have chosen to restore a drive")
@@ -371,7 +364,7 @@ while True:
 
     print("\n" + "-"*40)
     go_again = input("Do you want to perform another operation? (yes/no): ").strip().lower()
-    if go_again != 'yes':
+    if go_again not in ['yes', 'y']:
         print("Thank you for using FetchBurn. Goodbye!")
         break
 
