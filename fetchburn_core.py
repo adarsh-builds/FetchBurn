@@ -278,94 +278,96 @@ def restore_drive(drive_number):
         return False
     return True
 
-if not is_admin():
-    print("This script must be run with administrator privileges. Please run it as an administrator.")
-    print("Requesting administrator privileges...")
-    script = os.path.abspath(sys.argv[0])
-    ctypes.windll.shell32.ShellExecuteW(None,
-                                        "runas",
-                                        sys.executable,
-                                        f'"{script}"',
-                                        None,
-                                        1)
-    sys.exit()
+if __name__ == "__main__":
 
-print("FetchBurn starting...")
-#fetching data from API
-while True:
-    action = input(f"Do you want to write or restore: (write/restore/exit): ")
+    if not is_admin():
+        print("This script must be run with administrator privileges. Please run it as an administrator.")
+        print("Requesting administrator privileges...")
+        script = os.path.abspath(sys.argv[0])
+        ctypes.windll.shell32.ShellExecuteW(None,
+                                            "runas",
+                                            sys.executable,
+                                            f'"{script}"',
+                                            None,
+                                            1)
+        sys.exit()
 
-    if action.lower() == 'exit':
-        print("Exiting the program.")
-        break
+    print("FetchBurn starting...")
+    #fetching data from API
+    while True:
+        action = input(f"Do you want to write or restore: (write/restore/exit): ")
 
-    elif action.lower() == 'write':
-        print("\nYou have chosen to write an ISO to a removable drive.")
-        
-        # Fetch details
-        download_url, version, base_url, filename = fetch_ubuntu_iso_details()
-        
-        if not download_url:
-            print(f"Error fetching Ubuntu details: {filename}")
-            continue
+        if action.lower() == 'exit':
+            print("Exiting the program.")
+            break
+
+        elif action.lower() == 'write':
+            print("\nYou have chosen to write an ISO to a removable drive.")
             
-        print(f"Latest stable release: {version}")
-        
-        # Download
-        try:
-            save_path = download_iso_file(download_url, filename)
-        except Exception as e:
-            print(f"Download failed: {e}")
-            continue
+            # Fetch details
+            download_url, version, base_url, filename = fetch_ubuntu_iso_details()
             
-        # Verify
-        if not verify_iso_checksum(save_path, filename, base_url):
-            continue  # Skips the flash if the file is corrupted
+            if not download_url:
+                print(f"Error fetching Ubuntu details: {filename}")
+                continue
+                
+            print(f"Latest stable release: {version}")
             
-        # Flash to USB
-        print("\nAttempting to write the ISO file to a removable drive...")
-        usb_drives = find_usb_physical_drives()
-        
-        if usb_drives:
-            target_drive = usb_drives[0] 
-            device_path = f"\\\\.\\PhysicalDrive{target_drive['DeviceID']}"
+            # Download
+            try:
+                save_path = download_iso_file(download_url, filename)
+            except Exception as e:
+                print(f"Download failed: {e}")
+                continue
+                
+            # Verify
+            if not verify_iso_checksum(save_path, filename, base_url):
+                continue  # Skips the flash if the file is corrupted
+                
+            # Flash to USB
+            print("\nAttempting to write the ISO file to a removable drive...")
+            usb_drives = find_usb_physical_drives()
             
-            print(f"Target selected: {target_drive['FriendlyName']}")
-            confirm = input(f"Are you sure you want to write {filename} to {target_drive['FriendlyName']}? This will ERASE ALL DATA. (yes/no): ")
-            
-            if confirm.lower() == 'yes':
-                print(f"Starting flash process for {target_drive['FriendlyName']}...")
-                if write_iso_with_python(save_path, device_path, target_drive):
-                    print("Base operation completed successfully!")
-                    create_data_partition(target_drive['DeviceID'])
+            if usb_drives:
+                target_drive = usb_drives[0] 
+                device_path = f"\\\\.\\PhysicalDrive{target_drive['DeviceID']}"
+                
+                print(f"Target selected: {target_drive['FriendlyName']}")
+                confirm = input(f"Are you sure you want to write {filename} to {target_drive['FriendlyName']}? This will ERASE ALL DATA. (yes/no): ")
+                
+                if confirm.lower() == 'yes':
+                    print(f"Starting flash process for {target_drive['FriendlyName']}...")
+                    if write_iso_with_python(save_path, device_path, target_drive):
+                        print("Base operation completed successfully!")
+                        create_data_partition(target_drive['DeviceID'])
+                    else:
+                        print("Operation failed during the flash process.")
                 else:
-                    print("Operation failed during the flash process.")
+                    print("Operation cancelled by user.")
             else:
-                print("Operation cancelled by user.")
-        else:
-            print("No removable drives detected.")
-            
-    elif action.lower() == 'restore':
-        print("You have chosen to restore a drive")
-        usb_drives = find_usb_physical_drives()
-        if usb_drives:
-            target_drive = usb_drives[0]
-            confirm_wipe = input (f"Are you sure you want to wipe the drive {target_drive['FriendlyName']}? This will erase all data on the drive. (yes/no): ")
-            if confirm_wipe.lower() == 'yes':
-                restore_drive(target_drive['DeviceID'])
+                print("No removable drives detected.")
+                
+        elif action.lower() == 'restore':
+            print("You have chosen to restore a drive")
+            usb_drives = find_usb_physical_drives()
+            if usb_drives:
+                target_drive = usb_drives[0]
+                confirm_wipe = input (f"Are you sure you want to wipe the drive {target_drive['FriendlyName']}? This will erase all data on the drive. (yes/no): ")
+                if confirm_wipe.lower() == 'yes':
+                    restore_drive(target_drive['DeviceID'])
+                else:
+                    print("Operation cancelled.")
             else:
-                print("Operation cancelled.")
+                print("No removable drives detected.")
+
         else:
-            print("No removable drives detected.")
+            print("Invalid action. Please choose 'write', 'restore', or 'exit'.")
+            continue
 
-    else:
-        print("Invalid action. Please choose 'write', 'restore', or 'exit'.")
-        continue
+        print("\n" + "-"*40)
+        go_again = input("Do you want to perform another operation? (yes/no): ").strip().lower()
+        if go_again not in ['yes', 'y']:
+            print("Thank you for using FetchBurn. Goodbye!")
+            break
 
-    print("\n" + "-"*40)
-    go_again = input("Do you want to perform another operation? (yes/no): ").strip().lower()
-    if go_again not in ['yes', 'y']:
-        print("Thank you for using FetchBurn. Goodbye!")
-        break
-
-input("\nPress Enter to exit...")
+    input("\nPress Enter to exit...")
